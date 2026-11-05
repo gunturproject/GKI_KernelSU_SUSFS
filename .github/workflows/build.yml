@@ -221,6 +221,12 @@ jobs:
           sublevel: ${{ steps.extract.outputs.sublevel }}
           os_patch_level: ${{ inputs.os_patch_level }}
 
+      - name: Fix and verify GhostLock (CVE-2026-43499)
+        uses: ./.github/actions/ghostlock-fix
+        with:
+          kernel_version: ${{ inputs.kernel_version }}
+          sublevel: ${{ steps.extract.outputs.sublevel }}
+
       - name: Reject KowSU with SUSFS
         if: inputs.root_flavor == 'kowsu' && (contains(inputs.feature_set, 'SUSFS') || inputs.feature_set == 'All')
         shell: bash

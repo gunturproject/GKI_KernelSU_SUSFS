@@ -1,0 +1,116 @@
+name: 'Fix and verify GhostLock (CVE-2026-43499)'
+description: 'Apply the upstream rtmutex waiter::task fix and verify the vulnerable pattern is gone'
+
+inputs:
+  kernel_version:
+    description: 'Linux kernel major/minor, for build metadata'
+    required: true
+  sublevel:
+    description: 'Linux kernel sublevel, for build metadata'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Apply upstream GhostLock fix
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      env:
+        KERNEL_VERSION: ${{ inputs.kernel_version }}
+        KERNEL_SUBLEVEL: ${{ inputs.sublevel }}
+      run: |
+        set -euo pipefail
+
+        TARGET='kernel/locking/rtmutex.c'
+        if [[ ! -f "$TARGET" ]]; then
+          echo "ERROR: $TARGET is missing; cannot assess CVE-2026-43499" >&2
+          exit 1
+        fi
+
+        # CVE-2026-43499 is fixed upstream by the commit titled:
+        #   rtmutex: Use waiter::task instead of current in remove_waiter()
+        # The hashes below are the official kernel.org stable backports for
+        # supported stable lines.  The action tries the exact upstream patch
+        # whose context matches this Android common-kernel tree; it never
+        # synthesizes or rewrites the security fix.
+        PATCHES=(
+          3bfdc63936dd4773109b7b8c280c0f3b5ae7d349
+          3fb7394a837740770f0d6b4b30567e60786a63f2
+          6d52dfcb2a5db86e346cf51f8fcf2071b8085166
+          838ce5cb5d93c3ab8b27e75bc6ad905a94b752fd
+          88614876370aac8ad1050ad785a4c095ba17ac11
+          8a1fc8d698ac5e5916e3082a0f74450d71f9611f
+          d8cce4773c2b23d819baf5abedc62f7b430e8745
+          f3fa3424bceb128d2be4b3745506b22844b87db7
+        )
+
+        # A source tree already containing the upstream fix is accepted and
+        # still goes through the verifier below.
+        if grep -qF 'struct task_struct *waiter_task = waiter->task;' "$TARGET"; then
+          echo "[+] GhostLock fix already present in $TARGET"
+          echo 'GHOSTLOCK_FIX_STATUS=already_present' >> "$GITHUB_ENV"
+        else
+          tmp_patch="${RUNNER_TEMP}/ghostlock-cve-2026-43499.patch"
+          applied=''
+          for sha in "${PATCHES[@]}"; do
+            url="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/patch/?id=${sha}"
+            echo "[*] Testing official upstream patch ${sha}"
+            if curl -fsSL --retry 3 --retry-delay 2 --max-time 60 "$url" > "$tmp_patch" \
+              && patch -p1 --dry-run --forward < "$tmp_patch" >/dev/null 2>&1; then
+              patch -p1 --forward < "$tmp_patch"
+              applied="$sha"
+              break
+            fi
+          done
+          if [[ -z "$applied" ]]; then
+            echo "ERROR: no official kernel.org CVE-2026-43499 backport matched this source tree" >&2
+            echo "       Refusing to apply an invented or fuzzy replacement." >&2
+            exit 1
+          fi
+          echo "[+] Applied upstream GhostLock fix: $applied"
+          echo "GHOSTLOCK_FIX_STATUS=applied:${applied}" >> "$GITHUB_ENV"
+        fi
+
+        # Keep this verification deliberately tied to the affected function.
+        # It checks both the waiter task state cleanup and the priority-chain
+        # argument changed by the upstream fix.
+        python3 - "$TARGET" <<'PY'
+        import re
+        import sys
+        path = sys.argv[1]
+        text = open(path, encoding='utf-8').read()
+        m = re.search(r'\b(?:static\s+)?(?:void\s+)?(?:__sched\s+)?remove_waiter\s*\([^)]*\)\s*\{', text)
+        if not m:
+            raise SystemExit('ERROR: remove_waiter() was not found')
+        tail = text[m.start():]
+        nxt = re.search(r'\n(?:static\s+)?(?:void|int|bool|long|struct\s+\w+)\s+\w+\s*\([^;{]*\)\s*\{', tail[1:])
+        body = tail[:nxt.start()+1] if nxt else tail[:12000]
+        required = [
+            'struct task_struct *waiter_task = waiter->task;',
+            'waiter_task->pi_blocked_on = NULL;',
+            'next_lock, NULL, waiter_task',
+        ]
+        missing = [x for x in required if x not in body]
+        if missing:
+            raise SystemExit('ERROR: GhostLock verifier failed; missing: ' + ', '.join(missing))
+        print('[+] GhostLock verifier passed: remove_waiter() uses waiter->task')
+        PY
+
+        {
+          echo "- GhostLock (CVE-2026-43499): ${GHOSTLOCK_FIX_STATUS:-verified}"
+          echo "  - kernel=${KERNEL_VERSION}.${KERNEL_SUBLEVEL}"
+          echo "  - upstream fix: rtmutex uses waiter->task in remove_waiter()"
+        } >> /tmp/kernel-fixes-summary.md
+
+    - name: GhostLock source regression check
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        # This is a source/build-runner regression check, not an Android-device
+        # exploit execution. Running the public PoC can crash or reboot a
+        # device, and a GitHub-hosted x86 runner cannot validate an ARM Android
+        # kernel at runtime.
+        grep -qF 'struct task_struct *waiter_task = waiter->task;' kernel/locking/rtmutex.c
+        grep -qF 'waiter_task->pi_blocked_on = NULL;' kernel/locking/rtmutex.c
+        echo '[+] CVE-2026-43499 source regression check passed'
