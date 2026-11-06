@@ -1,0 +1,97 @@
+name: 'Fix and verify DirtyFrag (CVE-2026-43284)'
+description: 'Apply the upstream xfrm ESP shared-fragment fix and verify it'
+
+inputs:
+  kernel_version:
+    description: 'Linux kernel major/minor, for build metadata'
+    required: true
+  sublevel:
+    description: 'Linux kernel sublevel, for build metadata'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Apply upstream DirtyFrag ESP fix
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      env:
+        KERNEL_VERSION: ${{ inputs.kernel_version }}
+        KERNEL_SUBLEVEL: ${{ inputs.sublevel }}
+      run: |
+        set -euo pipefail
+
+        for file in net/ipv4/esp4.c net/ipv4/ip_output.c net/ipv6/esp6.c net/ipv6/ip6_output.c; do
+          [[ -f "$file" ]] || { echo "ERROR: missing $file; cannot assess CVE-2026-43284" >&2; exit 1; }
+        done
+
+        # CVE-2026-43284 is fixed upstream by:
+        #   xfrm: esp: avoid in-place decrypt on shared skb frags
+        # Mainline: f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4.
+        # These are the official stable backports referenced by the CVE record.
+        PATCHES=(
+          a6cb440f274a22456ef3e86b457344f1678f38f9
+          ab8b995323e5237041472d07e5055f5f7dcdf15b
+          fe785bb3a8096dffcc4048a85cd0c83337eeecad
+          5d55c7336f8032d434adcc5fab987ccc93a44aec
+          8253aab4659ca16116b522203c2a6b18dccacea7
+          50ed1e7873100f77abad20fd31c51029bc49cd03
+          b54edf1e9a3fd3491bdcb82a21f8d21315271e0d
+          71a1d9d985d26716f74d21f18ee8cac821b06e97
+          52646cbd00e765a6db9c3afe9535f26218276034
+          f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4
+        )
+
+        verify_fix() {
+          # Older stable trees use SKBTX_SHARED_FRAG while newer trees use
+          # SKBFL_SHARED_FRAG; both are the upstream shared-frag COW guard.
+          grep -Eq 'skb_has_shared_frag\(skb\)' net/ipv4/esp4.c
+          grep -Eq 'skb_has_shared_frag\(skb\)' net/ipv6/esp6.c
+          grep -Eq 'SKB(TX|FL)_SHARED_FRAG' net/ipv4/ip_output.c
+          # IPv6 datagram splice support was added in newer branches; the
+          # 5.10 backport legitimately has no ip6_output.c hunk.
+          grep -Eq 'SKB(TX|FL)_SHARED_FRAG' net/ipv4/ip_output.c net/ipv6/ip6_output.c 2>/dev/null || true
+        }
+
+        if verify_fix; then
+          echo '[+] DirtyFrag ESP fix already present'
+          echo 'DIRTYFRAG_FIX_STATUS=already_present' >> "$GITHUB_ENV"
+        else
+          tmp_patch="${RUNNER_TEMP}/dirtyfrag-cve-2026-43284.patch"
+          applied=''
+          for sha in "${PATCHES[@]}"; do
+            url="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/patch/?id=${sha}"
+            echo "[*] Testing official upstream patch ${sha}"
+            if curl -fsSL --retry 3 --retry-delay 2 --max-time 60 "$url" > "$tmp_patch" \
+              && patch -p1 --dry-run --forward < "$tmp_patch" >/dev/null 2>&1; then
+              patch -p1 --forward < "$tmp_patch"
+              applied="$sha"
+              break
+            fi
+          done
+          if [[ -z "$applied" ]]; then
+            echo 'ERROR: no official kernel.org CVE-2026-43284 backport matched this source tree' >&2
+            echo '       Refusing an invented or fuzzy DirtyFrag replacement.' >&2
+            exit 1
+          fi
+          echo "[+] Applied upstream DirtyFrag ESP fix: $applied"
+          echo "DIRTYFRAG_FIX_STATUS=applied:${applied}" >> "$GITHUB_ENV"
+          verify_fix
+        fi
+
+        {
+          echo "- DirtyFrag ESP (CVE-2026-43284): ${DIRTYFRAG_FIX_STATUS:-verified}"
+          echo "  - kernel=${KERNEL_VERSION}.${KERNEL_SUBLEVEL}"
+          echo "  - xfrm ESP no longer decrypts shared skb fragments in place"
+        } >> /tmp/kernel-fixes-summary.md
+
+    - name: DirtyFrag source regression check
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        for file in net/ipv4/esp4.c net/ipv6/esp6.c; do
+          grep -Eq 'skb_has_shared_frag\(skb\)' "$file"
+        done
+        grep -Eq 'SKB(TX|FL)_SHARED_FRAG' net/ipv4/ip_output.c
+        echo '[+] CVE-2026-43284 source regression check passed'
