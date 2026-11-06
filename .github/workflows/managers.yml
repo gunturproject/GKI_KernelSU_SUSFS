@@ -20,7 +20,7 @@ on:
           - FinaSU
           - No Root
           - KernelSU-Next-SUSFS
-        default: All
+        default: KernelSU-Next
       kernelsu_next_commit:
         description: "Pin KernelSU-Next manager to this commit (40-char SHA, empty = latest dev tip)"
         required: false
@@ -62,7 +62,7 @@ on:
         description: "Root flavor to fetch managers for"
         required: false
         type: string
-        default: All
+        default: KernelSU-Next
       kernelsu_next_commit:
         description: "Pin KernelSU-Next manager commit"
         required: false

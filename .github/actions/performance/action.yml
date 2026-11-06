@@ -1,5 +1,5 @@
-name: 'Apply Performance Patches'
-description: 'Apply experimental kernel patches with version-specific logic'
+name: 'Apply Universal Performance and Storage Optimizations'
+description: 'Apply generic memory, CPU, F2FS, ext4 and storage-path optimizations without device-specific tuning'
 inputs:
   kernel_version:
     description: 'Kernel version (e.g., 6.1)'
